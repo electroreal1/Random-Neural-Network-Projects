@@ -1,19 +1,19 @@
 package neural_network.games;
 
-import neural_network.Layer;
-import neural_network.NeuralNetwork;
-import neural_network.Neuron;
+import neural_network.master_network.BrainManager;
+import neural_network.Main;
+import neural_network.master_network.MoodController;
+import neural_network.master_network.NeuralNetwork;
 
 import javax.swing.*;
 import java.awt.*;
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
 public class SnakeGame extends JPanel implements Runnable {
-    private Thread gameThread;
-    private boolean isRunning = true;
+    private volatile boolean active = true;
+    private final Main hub;
 
     private final int POPULATION_SIZE = 100;
     private ArrayList<SnakeAI> population;
@@ -21,13 +21,12 @@ public class SnakeGame extends JPanel implements Runnable {
     private int maxScoreEver = 0;
     private SnakeAI bestAIEver;
 
-    private final String weightsFile = "snake_weights.txt";
     private static final int GRID_SIZE = 20;
     private static final int TILE_SIZE = 25;
     private Point food;
-    private Random random = new Random();
+    private final Random random = new Random();
 
-    private class SnakeAI {
+    private static class SnakeAI {
         NeuralNetwork brain;
         double fitness = 0;
         int score = 0;
@@ -54,73 +53,31 @@ public class SnakeGame extends JPanel implements Runnable {
         }
 
         SnakeAI cloneAndMutate() {
-            NeuralNetwork mutant = new NeuralNetwork(0.1);
-            mutant.addLayer(new Layer(16, 12));
-            mutant.addLayer(new Layer(4, 16));
-
-            List<Layer> origL = this.brain.getLayers();
-            List<Layer> mutL = mutant.getLayers();
-
-            for (int l = 0; l < origL.size(); l++) {
-                Neuron[] origN = origL.get(l).getNeurons();
-                Neuron[] mutN = mutL.get(l).getNeurons();
-                for (int n = 0; n < origN.length; n++) {
-                    double[] ow = origN[n].getWeights();
-                    double[] mw = mutN[n].getWeights();
-                    for (int w = 0; w < ow.length; w++) {
-                        mw[w] = ow[w] + (random.nextDouble() < 0.2 ? random.nextGaussian() * 0.5 : 0);
-                    }
-                    mutN[n].setBias(origN[n].getBias() + (random.nextDouble() < 0.1 ? random.nextGaussian() * 0.3 : 0));
-                }
-            }
-            return new SnakeAI(mutant);
+            return new SnakeAI(BrainManager.cloneAndMutate(this.brain));
         }
     }
 
-    public static void main(String[] args) {
-        JFrame frame = new JFrame("Neural Snake Evolution Arena");
-        SnakeGame game = new SnakeGame();
-        frame.add(game);
-        frame.setSize(530, 570);
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setLocationRelativeTo(null);
-        frame.setVisible(true);
-        game.startGame();
-    }
-
-    public SnakeGame() {
+    public SnakeGame(Main hub) {
+        this.hub = hub;
         setBackground(Color.DARK_GRAY);
         setFocusable(true);
         initPopulation();
-
-        File f = new File(weightsFile);
-        if (f.exists() && !population.isEmpty()) {
-            population.get(0).brain.loadWeights(weightsFile);
-            bestAIEver = population.get(0);
-        }
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (bestAIEver != null) {
-                bestAIEver.brain.saveWeights(weightsFile);
-                System.out.println("Auto-saved Snake AI weights to " + weightsFile);
-            }
-        }));
-
         spawnFood();
+    }
+
+    public void setActive(boolean active) {
+        this.active = active;
+        if (active && hub != null && !population.isEmpty()) {
+            BrainManager.copyWeights(hub.getBrainManager().getMasterNetwork(), population.get(0).brain);
+        }
     }
 
     private void initPopulation() {
         population = new ArrayList<>();
         for (int i = 0; i < POPULATION_SIZE; i++) {
-            NeuralNetwork net = new NeuralNetwork(0.1);
-            net.addLayer(new Layer(16, 12));
-            net.addLayer(new Layer(4, 16));
-            for (Layer layer : net.getLayers()) {
-                for (Neuron neuron : layer.getNeurons()) {
-                    double[] w = neuron.getWeights();
-                    for (int j = 0; j < w.length; j++) neuron.setWeight(j, random.nextGaussian() * 2.0);
-                    neuron.setBias(random.nextGaussian());
-                }
+            NeuralNetwork net = BrainManager.createNewNetwork();
+            if (hub != null && i == 0) {
+                BrainManager.copyWeights(hub.getBrainManager().getMasterNetwork(), net);
             }
             population.add(new SnakeAI(net));
         }
@@ -128,7 +85,7 @@ public class SnakeGame extends JPanel implements Runnable {
     }
 
     public void startGame() {
-        gameThread = new Thread(this);
+        Thread gameThread = new Thread(this);
         gameThread.start();
     }
 
@@ -138,14 +95,15 @@ public class SnakeGame extends JPanel implements Runnable {
 
     @Override
     public void run() {
+        boolean isRunning = true;
         while (isRunning) {
+            if (!active) {
+                try { Thread.sleep(100); } catch (InterruptedException e) { break; }
+                continue;
+            }
             updateGame();
             repaint();
-            try {
-                Thread.sleep(80);
-            } catch (InterruptedException e) {
-                break;
-            }
+            try { Thread.sleep(50); } catch (InterruptedException e) { break; }
         }
     }
 
@@ -157,20 +115,23 @@ public class SnakeGame extends JPanel implements Runnable {
             allDead = false;
 
             Point head = ai.body.get(0);
-            double[] inputs = {
-                    head.x / (double) GRID_SIZE,
-                    head.y / (double) GRID_SIZE,
-                    food.x / (double) GRID_SIZE,
-                    food.y / (double) GRID_SIZE,
-                    head.x == 0 ? 1 : 0,
-                    head.x == GRID_SIZE - 1 ? 1 : 0,
-                    head.y == 0 ? 1 : 0,
-                    head.y == GRID_SIZE - 1 ? 1 : 0,
-                    ai.dir == 0 ? 1 : 0,
-                    ai.dir == 1 ? 1 : 0,
-                    ai.dir == 2 ? 1 : 0,
-                    ai.dir == 3 ? 1 : 0
-            };
+            double[] inputs = new double[BrainManager.INPUT_SIZE];
+            inputs[0] = head.x / (double) GRID_SIZE;
+            inputs[1] = head.y / (double) GRID_SIZE;
+            inputs[2] = food.x / (double) GRID_SIZE;
+            inputs[3] = food.y / (double) GRID_SIZE;
+            inputs[4] = head.x == 0 ? 1 : 0;
+            inputs[5] = head.x == GRID_SIZE - 1 ? 1 : 0;
+            inputs[6] = head.y == 0 ? 1 : 0;
+            inputs[7] = head.y == GRID_SIZE - 1 ? 1 : 0;
+            inputs[8] = ai.dir == 0 ? 1 : 0;
+            inputs[9] = ai.dir == 1 ? 1 : 0;
+            inputs[10] = ai.dir == 2 ? 1 : 0;
+            inputs[11] = ai.dir == 3 ? 1 : 0;
+
+            if (hub != null) {
+                hub.getMoodController().injectMetaInputs(inputs, MoodController.GAME_SNAKE);
+            }
 
             double[] outputs = ai.brain.predict(inputs);
             int bestDir = 0;
@@ -180,6 +141,10 @@ public class SnakeGame extends JPanel implements Runnable {
                     max = outputs[i];
                     bestDir = i;
                 }
+            }
+
+            if (hub != null && ai == population.get(0)) {
+                hub.getBrainManager().recordLiveState(ai.brain, inputs);
             }
 
             if (!(ai.dir == 0 && bestDir == 2) && !(ai.dir == 2 && bestDir == 0) &&
@@ -228,9 +193,13 @@ public class SnakeGame extends JPanel implements Runnable {
         }
 
         if (allDead) {
+            int genBest = population.stream().mapToInt(a -> a.score).max().orElse(0);
             evolveNextGen();
             generation++;
             spawnFood();
+            if (hub != null) {
+                hub.onGenerationComplete(MoodController.GAME_SNAKE, genBest, maxScoreEver, bestAIEver.brain);
+            }
         }
     }
 
@@ -251,22 +220,27 @@ public class SnakeGame extends JPanel implements Runnable {
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
+        int offsetX = 75;
+        int offsetY = 40;
+
+        g.setColor(new Color(45, 45, 55));
+        g.fillRect(offsetX, offsetY, GRID_SIZE * TILE_SIZE, GRID_SIZE * TILE_SIZE);
+
         g.setColor(Color.RED);
-        g.fillRect(food.x * TILE_SIZE, food.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+        g.fillRect(offsetX + food.x * TILE_SIZE, offsetY + food.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
 
         g.setColor(Color.GREEN);
         for (SnakeAI ai : population) {
             if (ai.isAlive) {
                 for (Point p : ai.body) {
-                    g.fillRect(p.x * TILE_SIZE, p.y * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1);
+                    g.fillRect(offsetX + p.x * TILE_SIZE, offsetY + p.y * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1);
                 }
                 break;
             }
         }
 
         g.setColor(Color.WHITE);
-        g.setFont(new Font("SansSerif", Font.BOLD, 14));
-        g.drawString("Generation: " + generation, 20, 25);
-        g.drawString("Max Score: " + maxScoreEver, 20, 45);
+        g.setFont(new Font("SansSerif", Font.BOLD, 16));
+        g.drawString("Generation: " + generation + "   |   Max Score: " + maxScoreEver, offsetX, 28);
     }
 }

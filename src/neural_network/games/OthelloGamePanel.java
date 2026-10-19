@@ -1,36 +1,38 @@
 package neural_network.games;
 
-import neural_network.Layer;
-import neural_network.NeuralNetwork;
-import neural_network.Neuron;
+import neural_network.master_network.BrainManager;
+import neural_network.Main;
+import neural_network.master_network.MoodController;
+import neural_network.master_network.NeuralNetwork;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
 public class OthelloGamePanel extends JPanel implements Runnable {
-    private Thread gameThread;
-    private boolean isRunning = true;
+    private volatile boolean active = true;
+    private final Main hub;
+    private final int POPULATION_SIZE = 2;
+    private static final int AUTO_MOVE_DELAY_MS = 200;
+    private static final int HUMAN_MODE_DELAY_MS = 650;
 
-    private final int POPULATION_SIZE = 30;
     private ArrayList<OthelloAI> population;
     private int generation = 1;
     private int bestScoreEver = 0;
 
-    private int[][] board = new int[8][8];
-    private boolean aiTurn = true; // True = AI (Black / 1), False = Human (White / 2)
+    private final int[][] board = new int[8][8];
+    private boolean aiTurn = true;
     private boolean playMode = false;
-    private Random random = new Random();
+    private final Random random = new Random();
     private OthelloAI currentBestAI;
 
-    private final String weightsFile = "othello_weights.txt";
-
-    private class OthelloAI {
+    private static class OthelloAI {
         NeuralNetwork brain;
         double fitness = 0;
         int wins = 0;
@@ -40,71 +42,24 @@ public class OthelloGamePanel extends JPanel implements Runnable {
         }
 
         OthelloAI cloneAndMutate() {
-            NeuralNetwork mutantBrain = new NeuralNetwork(0.1);
-            mutantBrain.addLayer(new Layer(32, 64));
-            mutantBrain.addLayer(new Layer(64, 32));
-
-            List<Layer> originalLayers = this.brain.getLayers();
-            List<Layer> mutantLayers = mutantBrain.getLayers();
-
-            for (int l = 0; l < originalLayers.size(); l++) {
-                Neuron[] origNeurons = originalLayers.get(l).getNeurons();
-                Neuron[] mutNeurons = mutantLayers.get(l).getNeurons();
-
-                for (int n = 0; n < origNeurons.length; n++) {
-                    double[] origWeights = origNeurons[n].getWeights();
-                    double[] mutWeights = mutNeurons[n].getWeights();
-
-                    for (int w = 0; w < origWeights.length; w++) {
-                        if (random.nextDouble() < 0.2) {
-                            mutWeights[w] = origWeights[w] + random.nextGaussian() * 0.5;
-                        } else {
-                            mutWeights[w] = origWeights[w];
-                        }
-                    }
-                    mutNeurons[n].setBias(origNeurons[n].getBias() + (random.nextDouble() < 0.1 ? random.nextGaussian() * 0.3 : 0));
-                }
-            }
-            return new OthelloAI(mutantBrain);
+            return new OthelloAI(BrainManager.cloneAndMutate(this.brain));
         }
     }
 
-    public static void main(String[] args) {
-        JFrame frame = new JFrame("Neural Othello Evolution Arena (Press 'P' to Play vs AI)");
-        OthelloGamePanel game = new OthelloGamePanel();
-        frame.add(game);
-        frame.setSize(600, 650);
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setLocationRelativeTo(null);
-        frame.setVisible(true);
-        game.startGame();
-    }
-
-    public OthelloGamePanel() {
+    public OthelloGamePanel(Main hub) {
+        this.hub = hub;
         setBackground(new Color(20, 80, 40));
         setFocusable(true);
 
         initPopulation();
 
-        File f = new File(weightsFile);
-        if (f.exists() && !population.isEmpty()) {
-            population.get(0).brain.loadWeights(weightsFile);
-            currentBestAI = population.get(0);
-        }
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (currentBestAI != null) {
-                currentBestAI.brain.saveWeights(weightsFile);
-                System.out.println("Auto-saved best Othello AI weights to " + weightsFile);
-            }
-        }));
-
         addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
+                requestFocusInWindow();
                 if (playMode && !aiTurn && !isGameOver()) {
                     int cellSize = 60;
-                    int startX = 30;
+                    int startX = 20;
                     int startY = 30;
 
                     int c = (e.getX() - startX) / cellSize;
@@ -126,13 +81,12 @@ public class OthelloGamePanel extends JPanel implements Runnable {
             }
         });
 
-        addKeyListener(new java.awt.event.KeyAdapter() {
+        addKeyListener(new KeyAdapter() {
             @Override
-            public void keyPressed(java.awt.event.KeyEvent e) {
-                if (e.getKeyCode() == java.awt.event.KeyEvent.VK_P) {
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_P) {
                     playMode = !playMode;
                     resetBoard();
-                    System.out.println("Mode changed: " + (playMode ? "Play vs AI Mode" : "Auto-Training Mode"));
                 }
             }
         });
@@ -140,32 +94,27 @@ public class OthelloGamePanel extends JPanel implements Runnable {
         resetBoard();
     }
 
+    public void setActive(boolean active) {
+        this.active = active;
+        if (active && hub != null && !population.isEmpty()) {
+            BrainManager.copyWeights(hub.getBrainManager().getMasterNetwork(), population.get(0).brain);
+        }
+    }
+
     private void initPopulation() {
         population = new ArrayList<>();
         for (int i = 0; i < POPULATION_SIZE; i++) {
-            NeuralNetwork net = new NeuralNetwork(0.1);
-            net.addLayer(new Layer(32, 64));
-            net.addLayer(new Layer(64, 32));
-            initializeRandomWeights(net);
+            NeuralNetwork net = BrainManager.createNewNetwork();
+            if (hub != null && i == 0) {
+                BrainManager.copyWeights(hub.getBrainManager().getMasterNetwork(), net);
+            }
             population.add(new OthelloAI(net));
         }
         currentBestAI = population.get(0);
     }
 
-    private void initializeRandomWeights(NeuralNetwork net) {
-        for (Layer layer : net.getLayers()) {
-            for (Neuron neuron : layer.getNeurons()) {
-                double[] weights = neuron.getWeights();
-                for (int i = 0; i < weights.length; i++) {
-                    neuron.setWeight(i, random.nextGaussian() * 2.0);
-                }
-                neuron.setBias(random.nextGaussian());
-            }
-        }
-    }
-
     public void startGame() {
-        gameThread = new Thread(this);
+        Thread gameThread = new Thread(this);
         gameThread.start();
     }
 
@@ -184,18 +133,20 @@ public class OthelloGamePanel extends JPanel implements Runnable {
 
     @Override
     public void run() {
+        boolean isRunning = true;
         while (isRunning) {
+            if (!active) {
+                try { Thread.sleep(100); } catch (InterruptedException e) { break; }
+                continue;
+            }
+
             if (!playMode) {
                 playGeneration();
-                try {
-                    Thread.sleep(30);
-                } catch (InterruptedException e) {
-                    break;
-                }
+                try { Thread.sleep(250); } catch (InterruptedException e) { break; }
             } else {
                 if (aiTurn && !isGameOver()) {
                     if (hasValidMoves(1)) {
-                        int move = getBestValidMove(currentBestAI, 1);
+                        int move = getBestValidMove(currentBestAI);
                         if (move != -1) {
                             makeMove(move / 8, move % 8, 1);
                         }
@@ -203,42 +154,38 @@ public class OthelloGamePanel extends JPanel implements Runnable {
 
                     if (hasValidMoves(2)) {
                         aiTurn = false;
-                    } else if (hasValidMoves(1)) {
-                        aiTurn = true;
-                    }
+                    } else if (hasValidMoves(1)) aiTurn = true;
                     repaint();
                 }
-                try {
-                    Thread.sleep(600);
-                } catch (InterruptedException e) {
-                    break;
-                }
+                try { Thread.sleep(HUMAN_MODE_DELAY_MS); } catch (InterruptedException e) { break; }
             }
         }
     }
 
     private void playGeneration() {
-        for (OthelloAI ai : population) {
+        int genBestScore = 0;
+        for (int i = 0; i < population.size(); i++) {
+            if (!active || playMode) return;
+
+            OthelloAI ai = population.get(i);
+            boolean watchLive = (i == 0);
             resetBoard();
             boolean gameOver = false;
 
-            while (!gameOver) {
+            while (!gameOver && active && !playMode) {
                 if (aiTurn) {
                     if (hasValidMoves(1)) {
-                        int move = getBestValidMove(ai, 1);
+                        int move = getBestValidMove(ai);
                         if (move != -1) {
                             makeMove(move / 8, move % 8, 1);
                             ai.fitness += 5;
                         }
-                    } else {
-                        ai.fitness -= 2;
-                    }
+                    } else ai.fitness -= 2;
+
 
                     if (hasValidMoves(2)) {
                         aiTurn = false;
-                    } else if (hasValidMoves(1)) {
-                        aiTurn = true;
-                    }
+                    } else if (hasValidMoves(1)) aiTurn = true;
                 } else {
                     if (hasValidMoves(2)) {
                         List<Integer> validMoves = getValidMoves(2);
@@ -248,8 +195,15 @@ public class OthelloGamePanel extends JPanel implements Runnable {
 
                     if (hasValidMoves(1)) {
                         aiTurn = true;
-                    } else if (hasValidMoves(2)) {
-                        aiTurn = false;
+                    } else if (hasValidMoves(2)) aiTurn = false;
+                }
+
+                if (watchLive) {
+                    repaint();
+                    try {
+                        Thread.sleep(AUTO_MOVE_DELAY_MS);
+                    } catch (InterruptedException e) {
+                        return;
                     }
                 }
 
@@ -258,6 +212,7 @@ public class OthelloGamePanel extends JPanel implements Runnable {
                     int aiScore = countPieces(1);
                     ai.fitness += aiScore * 10;
                     ai.wins = aiScore;
+                    if (aiScore > genBestScore) genBestScore = aiScore;
                     if (aiScore > bestScoreEver) {
                         bestScoreEver = aiScore;
                         currentBestAI = ai;
@@ -267,18 +222,30 @@ public class OthelloGamePanel extends JPanel implements Runnable {
         }
         evolveNextGeneration();
         generation++;
+
+        if (hub != null) {
+            hub.onGenerationComplete(MoodController.GAME_OTHELLO, genBestScore, bestScoreEver, currentBestAI.brain);
+        }
     }
 
-    private int getBestValidMove(OthelloAI ai, int player) {
-        double[] inputs = new double[64];
+    private int getBestValidMove(OthelloAI ai) {
+        double[] inputs = new double[BrainManager.INPUT_SIZE];
         for (int r = 0; r < 8; r++) {
             for (int c = 0; c < 8; c++) {
-                inputs[r * 8 + c] = board[r][c] == player ? 1.0 : (board[r][c] == 0 ? 0.0 : -1.0);
+                inputs[r * 8 + c] = board[r][c] == 1 ? 1.0 : (board[r][c] == 0 ? 0.0 : -1.0);
             }
         }
 
+        if (hub != null) {
+            hub.getMoodController().injectMetaInputs(inputs, MoodController.GAME_OTHELLO);
+        }
+
         double[] outputs = ai.brain.predict(inputs);
-        List<Integer> validMoves = getValidMoves(player);
+        if (hub != null) {
+            hub.getBrainManager().recordLiveState(ai.brain, inputs);
+        }
+
+        List<Integer> validMoves = getValidMoves(1);
 
         if (validMoves.isEmpty()) return -1;
 
@@ -346,9 +313,7 @@ public class OthelloGamePanel extends JPanel implements Runnable {
                 nc += dc[i];
             }
             if (!toFlip.isEmpty() && nr >= 0 && nr < 8 && nc >= 0 && nc < 8 && board[nr][nc] == player) {
-                for (Point p : toFlip) {
-                    board[p.x][p.y] = player;
-                }
+                for (Point p : toFlip) board[p.x][p.y] = player;
             }
         }
     }
@@ -369,6 +334,7 @@ public class OthelloGamePanel extends JPanel implements Runnable {
 
     private void evolveNextGeneration() {
         population.sort((a, b) -> Double.compare(b.fitness, a.fitness));
+        if (population.get(0).wins >= currentBestAI.wins) currentBestAI = population.get(0);
         ArrayList<OthelloAI> nextGen = new ArrayList<>();
         nextGen.add(new OthelloAI(population.get(0).brain));
 
@@ -382,7 +348,7 @@ public class OthelloGamePanel extends JPanel implements Runnable {
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
         int cellSize = 60;
-        int startX = 30;
+        int startX = 20;
         int startY = 30;
 
         for (int r = 0; r < 8; r++) {
@@ -402,11 +368,10 @@ public class OthelloGamePanel extends JPanel implements Runnable {
             }
         }
 
-        // Highlight valid possible moves in Play Mode
-        if (playMode && !isGameOver()) {
+        if (!isGameOver()) {
             int activePlayer = aiTurn ? 1 : 2;
             List<Integer> validMoves = getValidMoves(activePlayer);
-            g.setColor(new Color(0, 255, 100, 140)); // Translucent green dot
+            g.setColor(new Color(0, 255, 100, 140));
             for (int move : validMoves) {
                 int r = move / 8;
                 int c = move % 8;
@@ -414,28 +379,13 @@ public class OthelloGamePanel extends JPanel implements Runnable {
             }
         }
 
-        g.setFont(new Font("SansSerif", Font.BOLD, 15));
+        g.setFont(new Font("SansSerif", Font.BOLD, 14));
         g.setColor(Color.WHITE);
-        g.drawString("Mode: " + (playMode ? "🎮 Play vs AI" : "🧬 Auto-Training"), 510, 30);
-        g.drawString("Press 'P' to Toggle Mode", 510, 55);
-        g.drawString("Generation: " + generation, 510, 95);
-        g.drawString("Best Score Ever: " + bestScoreEver, 510, 125);
+        g.drawString("Mode: " + (playMode ? "Play vs AI" : "Auto-Training"), 510, 45);
+        g.drawString("Click board + 'P' to toggle", 510, 70);
+        g.drawString("Generation: " + generation, 510, 110);
+        g.drawString("Best Score: " + bestScoreEver, 510, 135);
         g.drawString("AI (Black): " + countPieces(1), 510, 175);
-        g.drawString("Human (White): " + countPieces(2), 510, 205);
-
-        if (playMode) {
-            g.setColor(aiTurn ? Color.YELLOW : Color.CYAN);
-            g.drawString("Turn: " + (aiTurn ? "AI (Thinking...)" : "Your Turn"), 510, 240);
-        }
-
-        if (isGameOver()) {
-            g.setFont(new Font("SansSerif", Font.BOLD, 20));
-            g.setColor(Color.YELLOW);
-            g.drawString("GAME OVER!", 510, 280);
-            int black = countPieces(1);
-            int white = countPieces(2);
-            String winner = black > white ? "AI Wins!" : (white > black ? "You Win!" : "Tie Game!");
-            g.drawString(winner, 510, 310);
-        }
+        g.drawString("White: " + countPieces(2), 510, 200);
     }
 }

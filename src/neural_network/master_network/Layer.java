@@ -1,4 +1,4 @@
-package neural_network;
+package neural_network.master_network;
 
 public class Layer {
     private Neuron[] neurons;

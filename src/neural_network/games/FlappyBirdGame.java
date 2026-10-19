@@ -1,19 +1,19 @@
 package neural_network.games;
 
-import neural_network.Layer;
-import neural_network.NeuralNetwork;
-import neural_network.Neuron;
+import neural_network.master_network.BrainManager;
+import neural_network.Main;
+import neural_network.master_network.MoodController;
+import neural_network.master_network.NeuralNetwork;
 
 import javax.swing.*;
 import java.awt.*;
-import java.io.File;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Random;
 
 public class FlappyBirdGame extends JPanel implements Runnable {
-    private Thread gameThread;
     private boolean isRunning = true;
+    private volatile boolean active = true;
+    private final Main hub;
 
     private final int POPULATION_SIZE = 500;
     private ArrayList<Bird> birds;
@@ -21,8 +21,6 @@ public class FlappyBirdGame extends JPanel implements Runnable {
     private int maxScoreEver = 0;
     private int currentScore = 0;
     private Bird bestBirdEver;
-
-    private final String weightsFile = "flappy_weights.txt";
 
     private static class Pipe {
         int x, topHeight, gapSize;
@@ -34,12 +32,12 @@ public class FlappyBirdGame extends JPanel implements Runnable {
         }
     }
 
-    private ArrayList<Pipe> pipes;
+    private final ArrayList<Pipe> pipes;
     private final int pipeWidth = 60;
     private final int pipeSpeed = 4;
     private final Random random = new Random();
 
-    private class Bird {
+    private static class Bird {
         double y = 250;
         double velocity = 0;
         double fitness = 0;
@@ -52,98 +50,43 @@ public class FlappyBirdGame extends JPanel implements Runnable {
         }
 
         Bird cloneAndMutate() {
-            NeuralNetwork mutantBrain = new NeuralNetwork(0.1);
-            mutantBrain.addLayer(new Layer(8, 5));
-            mutantBrain.addLayer(new Layer(1, 8));
-
-            List<Layer> originalLayers = this.brain.getLayers();
-            List<Layer> mutantLayers = mutantBrain.getLayers();
-
-            for (int l = 0; l < originalLayers.size(); l++) {
-                Neuron[] origNeurons = originalLayers.get(l).getNeurons();
-                Neuron[] mutNeurons = mutantLayers.get(l).getNeurons();
-
-                for (int n = 0; n < origNeurons.length; n++) {
-                    double[] origWeights = origNeurons[n].getWeights();
-                    double[] mutWeights = mutNeurons[n].getWeights();
-
-                    for (int w = 0; w < origWeights.length; w++) {
-                        if (random.nextDouble() < 0.2) {
-                            mutWeights[w] = origWeights[w] + random.nextGaussian() * 0.5;
-                        } else {
-                            mutWeights[w] = origWeights[w];
-                        }
-                    }
-                    mutNeurons[n].setBias(origNeurons[n].getBias() + (random.nextDouble() < 0.1 ? random.nextGaussian() * 0.3 : 0));
-                }
-            }
-            return new Bird(mutantBrain);
+            return new Bird(BrainManager.cloneAndMutate(this.brain));
         }
     }
 
-    public static void main(String[] args) {
-        JFrame frame = new JFrame("Neural Flappy Bird Evolution Arena");
-        FlappyBirdGame game = new FlappyBirdGame();
-        frame.add(game);
-        frame.setSize(480, 680);
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setLocationRelativeTo(null);
-        frame.setVisible(true);
-        game.startGame();
+    public FlappyBirdGame(Main hub) {
+        this.hub = hub;
+        this.setBackground(new Color(113, 197, 207));
+        this.setFocusable(true);
+
+        this.birds = new ArrayList<>();
+        this.pipes = new ArrayList<>();
+
+        this.initPopulation();
+        this.resetRound();
     }
 
-    public FlappyBirdGame() {
-        setBackground(new Color(113, 197, 207));
-        setFocusable(true);
-
-        birds = new ArrayList<>();
-        pipes = new ArrayList<>();
-
-        initPopulation();
-
-        File f = new File(weightsFile);
-        if (f.exists() && !birds.isEmpty()) {
-            birds.get(0).brain.loadWeights(weightsFile);
-            bestBirdEver = birds.get(0);
+    public void setActive(boolean active) {
+        this.active = active;
+        if (active && hub != null && !birds.isEmpty()) {
+            BrainManager.copyWeights(hub.getBrainManager().getMasterNetwork(), birds.get(0).brain);
         }
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (bestBirdEver != null) {
-                bestBirdEver.brain.saveWeights(weightsFile);
-                System.out.println("Auto-saved best Flappy Bird AI weights to " + weightsFile);
-            }
-        }));
-
-        resetRound();
     }
 
     private void initPopulation() {
         birds.clear();
         for (int i = 0; i < POPULATION_SIZE; i++) {
-            NeuralNetwork net = new NeuralNetwork(0.1);
-            net.addLayer(new Layer(8, 5));
-            net.addLayer(new Layer(1, 8));
-
-            initializeRandomWeights(net);
+            NeuralNetwork net = BrainManager.createNewNetwork();
+            if (hub != null && i == 0) {
+                BrainManager.copyWeights(hub.getBrainManager().getMasterNetwork(), net);
+            }
             birds.add(new Bird(net));
         }
         bestBirdEver = birds.get(0);
     }
 
-    private void initializeRandomWeights(NeuralNetwork net) {
-        for (Layer layer : net.getLayers()) {
-            for (Neuron neuron : layer.getNeurons()) {
-                double[] weights = neuron.getWeights();
-                for (int i = 0; i < weights.length; i++) {
-                    neuron.setWeight(i, random.nextGaussian() * 2.0);
-                }
-                neuron.setBias(random.nextGaussian());
-            }
-        }
-    }
-
     public void startGame() {
-        gameThread = new Thread(this);
+        Thread gameThread = new Thread(this);
         gameThread.start();
     }
 
@@ -170,13 +113,13 @@ public class FlappyBirdGame extends JPanel implements Runnable {
     @Override
     public void run() {
         while (isRunning) {
+            if (!active) {
+                try { Thread.sleep(100); } catch (InterruptedException e) { break; }
+                continue;
+            }
             updateGame();
             repaint();
-            try {
-                Thread.sleep(20);
-            } catch (InterruptedException e) {
-                break;
-            }
+            try { Thread.sleep(20); } catch (InterruptedException e) { break; }
         }
     }
 
@@ -203,18 +146,23 @@ public class FlappyBirdGame extends JPanel implements Runnable {
             bird.fitness += 0.1;
 
             if (closestPipe != null) {
-                double[] inputs = {
-                        bird.y / 680.0,
-                        (bird.velocity + 10) / 20.0,
-                        (closestPipe.x - 80) / 480.0,
-                        closestPipe.topHeight / 680.0,
-                        (closestPipe.topHeight + closestPipe.gapSize) / 680.0
-                };
+                double[] inputs = new double[BrainManager.INPUT_SIZE];
+                inputs[0] = bird.y / 680.0;
+                inputs[1] = (bird.velocity + 10) / 20.0;
+                inputs[2] = (closestPipe.x - 80) / 480.0;
+                inputs[3] = closestPipe.topHeight / 680.0;
+                inputs[4] = (closestPipe.topHeight + closestPipe.gapSize) / 680.0;
+
+                if (hub != null) hub.getMoodController().injectMetaInputs(inputs, MoodController.GAME_FLAPPY);
+
 
                 double[] output = bird.brain.predict(inputs);
-                if (output[0] > 0.5) {
-                    bird.velocity = lift;
+                if (output[0] > 0.5) bird.velocity = lift;
+
+                if (hub != null && bird == birds.get(0)) {
+                    hub.getBrainManager().recordLiveState(bird.brain, inputs);
                 }
+                if (output[0] > 0.5) bird.velocity = lift;
             }
 
             for (Pipe p : pipes) {
@@ -225,15 +173,19 @@ public class FlappyBirdGame extends JPanel implements Runnable {
                 }
             }
 
-            if (bird.y > 620 || bird.y < 0) {
-                bird.isAlive = false;
-            }
+            if (bird.y > 600 || bird.y < 0) bird.isAlive = false;
         }
 
+
+
         if (allDead) {
+            int genBestScore = currentScore;
             evolveNextGeneration();
             generation++;
             resetRound();
+            if (hub != null) {
+                hub.onGenerationComplete(MoodController.GAME_FLAPPY, genBestScore, maxScoreEver, bestBirdEver.brain);
+            }
             return;
         }
 
@@ -258,11 +210,9 @@ public class FlappyBirdGame extends JPanel implements Runnable {
         if (!pipes.isEmpty() && pipes.get(0).x < -pipeWidth) {
             pipes.remove(0);
             int lastX = pipes.get(pipes.size() - 1).x;
-
             int newTopHeight = 50 + random.nextInt(280);
             int newGapSize = 120 + random.nextInt(40);
             int randomSpacing = 220 + random.nextInt(80);
-
             pipes.add(new Pipe(lastX + randomSpacing, newTopHeight, newGapSize));
         }
     }
@@ -270,22 +220,16 @@ public class FlappyBirdGame extends JPanel implements Runnable {
     private void evolveNextGeneration() {
         Bird bestBird = birds.get(0);
         for (Bird b : birds) {
-            if (b.fitness > bestBird.fitness) {
-                bestBird = b;
-            }
+            if (b.fitness > bestBird.fitness) bestBird = b;
         }
 
-        if (bestBird.score >= bestBirdEver.score) {
-            bestBirdEver = bestBird;
-        }
+        if (bestBird.score >= bestBirdEver.score) bestBirdEver = bestBird;
+
 
         ArrayList<Bird> nextGen = new ArrayList<>();
         nextGen.add(new Bird(bestBird.brain));
 
-        while (nextGen.size() < POPULATION_SIZE) {
-            nextGen.add(bestBird.cloneAndMutate());
-        }
-
+        while (nextGen.size() < POPULATION_SIZE) nextGen.add(bestBird.cloneAndMutate());
         birds = nextGen;
     }
 
